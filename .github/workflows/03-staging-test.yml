@@ -14,7 +14,7 @@ jobs:
     name: Staging Smoke Test
     runs-on: ubuntu-latest
 
-    if: >
+    if: >-
       ${{ github.event.workflow_run.conclusion == 'success' }}
 
     environment:
@@ -32,6 +32,19 @@ jobs:
             --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
+
+      - name: Record staging images
+        run: |
+          for deployment in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl rollout status deployment/"$deployment" -n staging --timeout=300s
+          done
+          kubectl get deployments frontend user-service student-service lecturer-service course-service enrollment-service \
+            -n staging -o json | jq --sort-keys '
+              .items | map(.metadata.name as $name | {
+                key: $name,
+                value: (.spec.template.spec.containers[] | select(.name == $name) | .image)
+              }) | from_entries
+            ' > "$RUNNER_TEMP/tested-images.json"
 
       - name: Wait for staging frontend IP
         run: |
@@ -61,3 +74,21 @@ jobs:
             --retry 10 \
             --retry-delay 5 \
             http://${{ env.FRONTEND_IP }}
+
+      - name: Verify staging images have not changed
+        run: |
+          kubectl get deployments frontend user-service student-service lecturer-service course-service enrollment-service \
+            -n staging -o json | jq --sort-keys '
+              .items | map(.metadata.name as $name | {
+                key: $name,
+                value: (.spec.template.spec.containers[] | select(.name == $name) | .image)
+              }) | from_entries
+            ' > "$RUNNER_TEMP/current-images.json"
+          diff "$RUNNER_TEMP/tested-images.json" "$RUNNER_TEMP/current-images.json"
+
+      - name: Upload tested images
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-images
+          path: ${{ runner.temp }}/tested-images.json
+          if-no-files-found: error
