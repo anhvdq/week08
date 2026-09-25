@@ -1,0 +1,82 @@
+name: Infrastructure Provisioning
+
+on:
+  workflow_call:
+
+concurrency:
+  group: azure-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_VAR_resource_group_name: ${{ vars.AKS_RESOURCE_GROUP }}
+      TF_VAR_acr_name: ${{ vars.ACR_NAME }}
+      TF_VAR_storage_account_name: ${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}
+      TF_VAR_aks_cluster_name: ${{ vars.AKS_CLUSTER_NAME }}
+      TF_VAR_aks_dns_prefix: ${{ vars.AKS_CLUSTER_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Configure Azure authentication
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          credentials = json.loads(os.environ["AZURE_CREDENTIALS"])
+          fields = {"ARM_CLIENT_ID": "clientId", "ARM_CLIENT_SECRET": "clientSecret",
+                    "ARM_TENANT_ID": "tenantId", "ARM_SUBSCRIPTION_ID": "subscriptionId"}
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for name, field in fields.items():
+                  value = credentials[field]
+                  if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+                      raise SystemExit("Invalid Azure credentials")
+                  print(f"::add-mask::{value}")
+                  output.write(f"{name}={value}\n")
+          PYTHON
+
+      - name: Initialize remote state
+        working-directory: terraform
+        env:
+          STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+          STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+          STATE_KEY: ${{ vars.TF_STATE_KEY }}
+        run: |
+          for name in STATE_RESOURCE_GROUP STATE_STORAGE_ACCOUNT STATE_CONTAINER STATE_KEY TF_VAR_resource_group_name TF_VAR_acr_name TF_VAR_storage_account_name TF_VAR_aks_cluster_name; do
+            test -n "${!name}" || { echo "Missing configuration: $name" >&2; exit 1; }
+          done
+          terraform init -input=false -lockfile=readonly \
+            -backend-config="resource_group_name=$STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$STATE_CONTAINER" \
+            -backend-config="key=$STATE_KEY"
+
+      - name: Validate and plan
+        working-directory: terraform
+        run: |
+          terraform validate
+          terraform plan -input=false -lock-timeout=5m -out="$RUNNER_TEMP/infra.tfplan"
+
+      - name: Apply saved plan
+        working-directory: terraform
+        run: terraform apply -input=false -lock-timeout=5m "$RUNNER_TEMP/infra.tfplan"
+
+      - name: Verify deployment registry configuration
+        working-directory: terraform
+        env:
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        run: |
+          test "$(terraform output -raw acr_login_server)" = "$ACR_LOGIN_SERVER" || {
+            echo "ACR_LOGIN_SERVER must match the provisioned registry." >&2
+            exit 1
+          }

@@ -197,3 +197,17 @@ cython_debug/
 .cursorindexingignore
 
 node_modules/
+# Terraform local configuration and sensitive generated files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan
+*.plan
+*.tfbackend
+crash.log
+crash.*.log
+.terraformrc
+terraform.rc
+# Keep .terraform.lock.hcl and sanitized *.tfvars.example files versioned.

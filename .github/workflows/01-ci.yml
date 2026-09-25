@@ -11,6 +11,25 @@ on:
 
 
 jobs:
+  provision-infrastructure:
+    needs: [backend-test, monitoring-validate]
+    uses: ./.github/workflows/infra-provisioning.yml
+    secrets: inherit
+
+  monitoring-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.18.4
+      - name: Validate monitoring chart
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm template monitoring prometheus-community/kube-prometheus-stack \
+            --version 75.15.1 --namespace monitoring \
+            --values kubernetes/monitoring/values.yaml > "$RUNNER_TEMP/monitoring.yaml"
 
   # =========================================================
   # Backend Tests
@@ -112,6 +131,8 @@ jobs:
     # All backend tests must pass before this job starts
     needs:
       - backend-test
+      - monitoring-validate
+      - provision-infrastructure
 
     # Build and push when code is pushed to main or manually triggered
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -159,6 +180,29 @@ jobs:
             --platform linux/amd64 \
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
+
+      - name: Login to Docker Hub for Scout
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Scan image and report recommendations
+        uses: docker/scout-action@v1
+        with:
+          command: cves,recommendations
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          exit-code: false
+          sarif-file: ${{ runner.temp }}/scout.sarif.json
+          summary: true
+
+      - name: Retain vulnerability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-${{ matrix.image }}-${{ github.sha }}
+          path: ${{ runner.temp }}/scout.sarif.json
+          if-no-files-found: error
 
       - name: Push Docker image with commit SHA
         run: |

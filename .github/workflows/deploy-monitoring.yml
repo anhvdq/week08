@@ -1,0 +1,57 @@
+name: Deploy Monitoring
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit that passed CI
+        required: true
+        type: string
+
+jobs:
+  deploy-monitoring:
+    name: Deploy Prometheus and Grafana
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.18.4
+
+      - name: Configure Grafana credentials
+        env:
+          GRAFANA_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          test -n "$GRAFANA_PASSWORD"
+          kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic grafana-admin -n monitoring \
+            --from-literal=admin-user=admin --from-literal=admin-password="$GRAFANA_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy Prometheus and Grafana
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+            --version 75.15.1 --namespace monitoring \
+            --values kubernetes/monitoring/values.yaml \
+            --atomic --wait --timeout 15m --history-max 5

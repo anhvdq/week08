@@ -9,8 +9,20 @@ on:
     branches:
       - main
 
+concurrency:
+  group: staging-and-monitoring
+  cancel-in-progress: false
+
 jobs:
+  deploy-monitoring:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    uses: ./.github/workflows/deploy-monitoring.yml
+    with:
+      ref: ${{ github.event.workflow_run.head_sha }}
+    secrets: inherit
+
   deploy-staging:
+    needs: deploy-monitoring
     name: Deploy to Staging
     runs-on: ubuntu-latest
 
@@ -53,6 +65,18 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      - name: Get application storage connection string
+        env:
+          STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}
+          RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+        run: |
+          connection=$(az storage account show-connection-string \
+            --name "$STORAGE_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+            --query connectionString --output tsv)
+          test -n "$connection"
+          echo "::add-mask::$connection"
+          echo "AZURE_STORAGE_CONNECTION_STRING=$connection" >> "$GITHUB_ENV"
+
       - name: Create application secret
         run: |
           kubectl create secret generic application-secret \
@@ -63,7 +87,7 @@ jobs:
             --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
             --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
             --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="$AZURE_STORAGE_CONNECTION_STRING" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
